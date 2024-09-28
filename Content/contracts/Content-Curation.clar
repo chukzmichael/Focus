@@ -9,7 +9,11 @@
 (define-constant ERR_INADEQUATE_BALANCE (err u104))
 (define-constant ERR_INVALID_TOPIC (err u105))
 (define-constant ERR_INVALID_FLAG (err u106))
+(define-constant ERR_OVERFLOW (err u107))
+(define-constant ERR_INVALID_APPRAISAL (err u108))
+(define-constant ERR_INVALID_ITEM_ID (err u109))
 (define-constant MIN_HYPERLINK_LENGTH u10)
+(define-constant MAX_UINT u340282366920938463463374607431768211455)
 
 ;; Define data variables
 (define-data-var submission-charge uint u10)
@@ -41,6 +45,11 @@
   { metric: int }
 )
 
+;; Helper function to check if an item exists
+(define-private (item-exists (item-identifier uint))
+  (is-some (map-get? curated-items { item-identifier: item-identifier }))
+)
+
 ;; Public functions
 
 ;; Submit new content for curation
@@ -49,7 +58,12 @@
     (
       (item-identifier (+ (var-get aggregate-submissions) u1))
     )
-    (asserts! (>= (len hyperlink) MIN_HYPERLINK_LENGTH) ERR_INVALID_SUBMISSION)
+    (asserts! (and 
+                (>= (len headline) u1)
+                (>= (len hyperlink) MIN_HYPERLINK_LENGTH)
+                (>= (len topic) u1)
+              ) ERR_INVALID_SUBMISSION)
+    (asserts! (> item-identifier (var-get aggregate-submissions)) ERR_OVERFLOW)
     (asserts! (is-some (index-of (var-get content-topics) topic)) ERR_INVALID_TOPIC)
     (asserts! (>= (stx-get-balance tx-sender) (var-get submission-charge)) ERR_INADEQUATE_BALANCE)
     (try! (stx-transfer? (var-get submission-charge) tx-sender PROTOCOL_ADMINISTRATOR))
@@ -67,6 +81,7 @@
       }
     )
     (var-set aggregate-submissions item-identifier)
+    (print { type: "new-item", item-identifier: item-identifier, originator: tx-sender })
     (ok item-identifier)
   )
 )
@@ -79,7 +94,8 @@
       (target-item (unwrap! (map-get? curated-items { item-identifier: item-identifier }) ERR_NONEXISTENT_ITEM))
       (appraiser-standing (default-to { metric: 0 } (map-get? participant-credibility { participant: tx-sender })))
     )
-    (asserts! (or (is-eq appraisal 1) (is-eq appraisal -1)) ERR_INVALID_SUBMISSION)
+    (asserts! (item-exists item-identifier) ERR_NONEXISTENT_ITEM)
+    (asserts! (or (is-eq appraisal 1) (is-eq appraisal -1)) ERR_INVALID_APPRAISAL)
     (map-set participant-appraisals
       { participant: tx-sender, item-identifier: item-identifier }
       { appraisal: appraisal }
@@ -92,6 +108,7 @@
       { participant: tx-sender }
       { metric: (+ (get metric appraiser-standing) appraisal) }
     )
+    (print { type: "appraisal", item-identifier: item-identifier, appraiser: tx-sender, appraisal: appraisal })
     (ok true)
   )
 )
@@ -102,12 +119,16 @@
     (
       (target-item (unwrap! (map-get? curated-items { item-identifier: item-identifier }) ERR_NONEXISTENT_ITEM))
     )
+    (asserts! (item-exists item-identifier) ERR_NONEXISTENT_ITEM)
     (asserts! (>= (stx-get-balance tx-sender) gratuity-amount) ERR_INADEQUATE_BALANCE)
-    (try! (stx-transfer? gratuity-amount tx-sender (get originator target-item)))
+    ;; Update state before transfer
     (map-set curated-items
       { item-identifier: item-identifier }
       (merge target-item { gratuities: (+ (get gratuities target-item) gratuity-amount) })
     )
+    ;; Perform transfer last
+    (try! (stx-transfer? gratuity-amount tx-sender (get originator target-item)))
+    (print { type: "reward", item-identifier: item-identifier, from: tx-sender, to: (get originator target-item), amount: gratuity-amount })
     (ok true)
   )
 )
@@ -118,11 +139,13 @@
     (
       (target-item (unwrap! (map-get? curated-items { item-identifier: item-identifier }) ERR_NONEXISTENT_ITEM))
     )
+    (asserts! (item-exists item-identifier) ERR_NONEXISTENT_ITEM)
     (asserts! (not (is-eq (get originator target-item) tx-sender)) ERR_INVALID_FLAG)
     (map-set curated-items
       { item-identifier: item-identifier }
       (merge target-item { flags: (+ (get flags target-item) u1) })
     )
+    (print { type: "flag", item-identifier: item-identifier, flagger: tx-sender })
     (ok true)
   )
 )
@@ -214,7 +237,9 @@
 (define-public (adjust-submission-charge (new-charge uint))
   (begin
     (asserts! (is-eq tx-sender PROTOCOL_ADMINISTRATOR) ERR_UNAUTHORIZED_ACCESS)
+    (asserts! (<= new-charge MAX_UINT) ERR_OVERFLOW)
     (var-set submission-charge new-charge)
+    (print { type: "fee-change", new-charge: new-charge })
     (ok true)
   )
 )
@@ -223,7 +248,9 @@
 (define-public (expunge-item (item-identifier uint))
   (begin
     (asserts! (is-eq tx-sender PROTOCOL_ADMINISTRATOR) ERR_UNAUTHORIZED_ACCESS)
+    (asserts! (item-exists item-identifier) ERR_NONEXISTENT_ITEM)
     (map-delete curated-items { item-identifier: item-identifier })
+    (print { type: "item-expunged", item-identifier: item-identifier })
     (ok true)
   )
 )
@@ -233,7 +260,9 @@
   (begin
     (asserts! (is-eq tx-sender PROTOCOL_ADMINISTRATOR) ERR_UNAUTHORIZED_ACCESS)
     (asserts! (< (len (var-get content-topics)) u10) ERR_INVALID_TOPIC)
+    (asserts! (>= (len new-topic) u1) ERR_INVALID_TOPIC)
     (var-set content-topics (unwrap-panic (as-max-len? (append (var-get content-topics) new-topic) u10)))
+    (print { type: "new-topic", topic: new-topic })
     (ok true)
   )
 )
